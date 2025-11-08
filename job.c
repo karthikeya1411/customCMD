@@ -106,7 +106,17 @@ static void run_job_manager(int job_index, int semid) {
     // 5. P2's "Tee" logic
     close(p[1]); // P2 only *reads* from the pipe
 
-    // Open the FIFO for writing.
+    // (FIX) Open the FIFO for reading in non-blocking mode first.
+    // This acts as a "keep-alive" and prevents the O_WRONLY
+    // open from blocking, allowing the job to run even if
+    // no client is connected via 'jobstream'.
+    int fifo_dummy_rd_fd = open(job->fifo_file, O_RDONLY | O_NONBLOCK);
+    if (fifo_dummy_rd_fd == -1) {
+        perror("open (fifo_dummy_rd_fd)"); 
+    }
+
+    // Open the FIFO for writing. This will no longer block
+    // because we are holding the read-end open ourselves.
     int fifo_fd = open(job->fifo_file, O_WRONLY);
     if (fifo_fd == -1) {
         perror("open fifo_file");
@@ -132,6 +142,8 @@ static void run_job_manager(int job_index, int semid) {
     close(p[0]);
     if (log_fd != -1) close(log_fd);
     if (fifo_fd != -1) close(fifo_fd);
+    // (FIX) Close the dummy read descriptor
+    if (fifo_dummy_rd_fd != -1) close(fifo_dummy_rd_fd);
 
     // 7. Wait for P3 (Executor) to finish
     int exec_status;
