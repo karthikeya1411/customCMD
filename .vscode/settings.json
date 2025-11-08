@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "*.dbclient-js": "javascript",
+        "sh_share.h": "c"
+    }
+}
