@@ -2,28 +2,17 @@
  * builtins.c
  *
  * Implementation of all the shell's built-in commands.
- *
- * --- (FIX) LIVE JOBSTATUS FEATURE ---
- * 1. do_submit() now sets the job->submit_time.
- * 2. do_jobkill() now sets the job->end_time.
- * 3. do_jobstatus() is completely rewritten to display
- * the new timestamps in a formatted way.
- * 4. Added a new static helper format_time().
- *
- * --- (FIX Bug D) ---
- * 1. do_jobkill() now sends the signal to -p2_pid
- * (the negative PID) to kill the entire
- * process group, preventing orphaned P3 processes.
  */
 #include "builtins.h"
 
-// --- (Feature 3) Global list for local background jobs ---
+// Global array to track local background jobs
 struct local_job local_job_list[MAX_LOCAL_JOBS];
+// Counter for active local background jobs
 int local_job_count = 0;
 
 
 /**
- * (Feature 3) init_local_jobs
+ * init_local_jobs
  * Initializes the local job list.
  */
 void init_local_jobs() {
@@ -36,7 +25,7 @@ void init_local_jobs() {
 }
 
 /**
- * (Feature 3) add_local_job (Static Helper)
+ * add_local_job (Static Helper)
  * Adds a new locally-run background job to the list.
  */
 static void add_local_job(pid_t pid, char **tokens) {
@@ -46,6 +35,7 @@ static void add_local_job(pid_t pid, char **tokens) {
     }
     
     int slot = -1;
+    // Find the first non-running (empty) slot
     for (int i = 0; i < MAX_LOCAL_JOBS; i++) {
         if (local_job_list[i].running == 0) {
             slot = i;
@@ -53,7 +43,8 @@ static void add_local_job(pid_t pid, char **tokens) {
         }
     }
     
-    if (slot == -1) slot = local_job_count; // Should be found, but fallback
+    // If no empty slot was found, use the current count
+    if (slot == -1) slot = local_job_count; 
 
     local_job_list[slot].pid = pid;
     local_job_list[slot].running = 1;
@@ -72,14 +63,15 @@ static void add_local_job(pid_t pid, char **tokens) {
 }
 
 /**
- * (Feature 3) remove_local_job
+ * remove_local_job
  * Marks a local job as 'done' after it has been reaped.
  * Called by the SIGCHLD handler in shell.c
  */
 void remove_local_job(pid_t pid) {
+    // Find the job by PID
     for (int i = 0; i < MAX_LOCAL_JOBS; i++) {
         if (local_job_list[i].pid == pid) {
-            local_job_list[i].running = 0;
+            local_job_list[i].running = 0; // Mark the slot as free
             local_job_count--;
             return;
         }
@@ -113,7 +105,6 @@ static int find_job_by_id(int job_id, struct sh_job_queue *shm_ptr) {
  *
  * Parses the 'submit "..."' command, finds an empty job slot
  * in shared memory, and populates it.
- * --- (FIX) MODIFIED to set submit_time ---
  */
 void do_submit(char *line, int semid, struct sh_job_queue *shm_ptr) {
     // Custom parsing for 'submit "command string"'
@@ -126,7 +117,7 @@ void do_submit(char *line, int semid, struct sh_job_queue *shm_ptr) {
     }
     
     // Extract the command
-    cmd_start++; // Move past the first quote
+    cmd_start++; // Move past the opening quote
     char cmd_buf[MAX_CMD_LEN];
     size_t len = cmd_end - cmd_start;
     
@@ -163,7 +154,7 @@ void do_submit(char *line, int semid, struct sh_job_queue *shm_ptr) {
         sprintf(job->log_file, "/tmp/job-%d.log", job->job_id);
         sprintf(job->fifo_file, "/tmp/job-%d.fifo", job->job_id);
 
-        // --- (FIX) Set timestamps ---
+        // Set timestamps
         job->submit_time = time(NULL);
         job->start_time = 0; // Not started yet
         job->end_time = 0;   // Not finished yet
@@ -176,16 +167,16 @@ void do_submit(char *line, int semid, struct sh_job_queue *shm_ptr) {
 }
 
 /**
- * --- (FIX) NEW HELPER FUNCTION ---
  * format_time
  *
  * Helper to format time_t into "HH:MM:SS" or "---" if time is 0.
  */
 static void format_time(time_t t, char *buf, size_t buf_size) {
     if (t == 0) {
+        // If time is 0, it's not set
         snprintf(buf, buf_size, "   ---    ");
     } else {
-        // Use localtime_r for thread-safety, though not strictly needed here
+        // Use localtime_r for thread-safety
         struct tm tm_info;
         localtime_r(&t, &tm_info);
         strftime(buf, buf_size, "%H:%M:%S", &tm_info);
@@ -195,11 +186,10 @@ static void format_time(time_t t, char *buf, size_t buf_size) {
 /**
  * do_jobstatus
  *
- * Reads the entire job table from shared memory and prints it.
- * --- (FIX) HEAVILY MODIFIED to print timestamps ---
+ * Reads the entire job table from shared memory and prints it
+ * in a formatted table.
  */
 void do_jobstatus(int semid, struct sh_job_queue *shm_ptr) {
-    // (Feature 1) Added "KILLED" to status strings
     const char* status_str[] = {"EMPTY", "QUEUED", "RUNNING", "DONE", "FAILED", "KILLED"};
     char cmd_preview[31]; // 30 chars + null
     char submit_buf[16], start_buf[16], end_buf[16]; // Buffers for time strings
@@ -351,7 +341,7 @@ void do_joblog(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
     printf("[SHell] Displaying log for Job %d (%s):\n", job_id, log_path);
     printf("--- BEGIN LOG ---\n");
 
-    // Fork/exec 'cat' on the log file, as per the PDF
+    // Fork/exec 'cat' on the log file
     pid_t pid = fork();
     if (pid == 0) {
         // Child
@@ -369,11 +359,10 @@ void do_joblog(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
 
 
 /**
- * (Feature 1) do_jobkill
+ * do_jobkill
  *
- * --- (FIX) MODIFIED to set end_time ---
- * --- (FIX Bug D) ---
- * Sends SIGKILL to the entire process group.
+ * Finds a running job in shared memory and sends
+ * a SIGKILL signal to its entire process group.
  */
 void do_jobkill(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
     int job_id = atoi(job_id_str);
@@ -400,8 +389,6 @@ void do_jobkill(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
             job_found = 1;
             // Mark it as KILLED immediately.
             job->status = STATUS_KILLED;
-            
-            // --- (FIX) Set the end time ---
             job->end_time = time(NULL);
         }
     }
@@ -410,9 +397,8 @@ void do_jobkill(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
     // --- END CRITICAL SECTION ---
     
     if (job_found && p2_pid > 0) {
-        // --- (FIX Bug D) ---
         // Send signal to the *negative* PID. This kills the
-        // entire process group (P2 and P3).
+        // entire process group (P2 and any of its children).
         if (kill(-p2_pid, SIGKILL) == 0) {
             printf("[SHell] Kill signal sent to Job %d (Process Group %d).\n", job_id, p2_pid);
         } else {
@@ -423,7 +409,7 @@ void do_jobkill(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
 
 
 /**
- * (Feature 3) do_jobs
+ * do_jobs
  *
  * Lists all locally-run background jobs.
  */
@@ -447,7 +433,7 @@ void do_jobs() {
 }
 
 /**
- * (Feature 3) do_kill_local
+ * do_kill_local
  *
  * Sends a SIGKILL to a locally-run background job.
  */
@@ -459,6 +445,7 @@ void do_kill_local(char *pid_str) {
     }
 
     int found = 0;
+    // Find the job in the local list
     for (int i = 0; i < MAX_LOCAL_JOBS; i++) {
         if (local_job_list[i].running && local_job_list[i].pid == pid) {
             found = 1;
@@ -488,7 +475,7 @@ void do_kill_local(char *pid_str) {
 void do_shutdown(int msgid) {
     struct msg_buf msg;
     msg.mtype = MSG_Q_SHUTDOWN;
-    // No payload needed, mtext[0] is fine
+    // No payload needed
 
     if (msgsnd(msgid, &msg, 0, 0) == -1) {
         perror("msgsnd (shutdown)");
@@ -500,7 +487,7 @@ void do_shutdown(int msgid) {
 
 
 /**
- * (Refactor 1) do_myls
+ * do_myls
  *
  * Implements 'myls' using opendir/readdir and stat()
  * to show file permissions and size.
@@ -527,8 +514,6 @@ void do_myls() {
         }
         
         // We must stat the file to get its info
-        // Note: stat() may fail on symlinks if not careful,
-        // but this simple version should be fine.
         snprintf(path_buf, sizeof(path_buf), "./%s", dir->d_name);
         
         if (stat(path_buf, &st) == -1) {
@@ -577,7 +562,7 @@ void do_cd(char *path) {
 
 
 /**
- * (Feature 3) do_external_command
+ * do_external_command
  *
  * A fork/exec executor.
  * - If background == 0, it waits for the child.
@@ -602,7 +587,7 @@ void do_external_command(char **tokens, int background) {
     } else {
         // --- Parent Process ---
         if (background) {
-            // (Feature 3) Add to local job list and return
+            // Add to local job list and return
             add_local_job(pid, tokens);
         } else {
             // Wait for the child to complete

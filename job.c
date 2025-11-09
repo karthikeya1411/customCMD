@@ -3,23 +3,6 @@
  *
  * Implementation of the Job Executor module.
  * Contains the P1 fork, P2 Job Manager, and P3 Executor logic.
- *
- * --- (FIX) LIVE JOBSTATUS FEATURE ---
- * 1. run_job_manager() now sets job->end_time when
- * a job finishes (DONE or FAILED).
- *
- * --- FIXES (Bugs B, D, E, F) ---
- * 1. (Bug B) P2 (run_job_manager) and P3 (run_executor)
- * now reset their SIGCHLD handler to SIG_DFL.
- *
- * 2. (Bug D) P2 (run_job_manager) now calls setpgid()
- * to become a process group leader.
- *
- * 3. (Bug E) P2 (run_job_manager) now ignores SIGPIPE
- * and checks write() for EPIPE.
- *
- * 4. (Bug F) P2's final status update is now wrapped
- * in a 'if (job->status == STATUS_RUNNING)' check.
  */
 #include "job.h"
 
@@ -31,6 +14,7 @@ static void run_executor(const char* cmd, int p[2]);
  * job_start (P1 - The Daemon's action)
  *
  * This function is called by the daemon (P1) *while it holds the semaphore lock*.
+ * It forks to create the P2 Job Manager process.
  */
 void job_start(int job_index, struct sh_job_queue *shm_ptr, int semid) {
     pid_t pid = fork();
@@ -65,26 +49,27 @@ void job_start(int job_index, struct sh_job_queue *shm_ptr, int semid) {
 /**
  * run_job_manager (P2 - The Job Manager)
  *
- * This is the "Tee Executor" logic from the project guide.
- * --- (FIX) MODIFIED to set end_time ---
+ * This is the "Tee Executor" logic. This process (P2) forks a
+ * grandchild (P3) to run the actual command. P2 then reads the
+ * output from P3 (via a pipe) and tees it to two destinations:
+ * 1. The job's log file.
+ * 2. The job's FIFO (for live 'jobstream').
  */
 static void run_job_manager(int job_index, int semid) {
-    // --- (FIX Bug B) ---
-    // Reset SIGCHLD handler to default to prevent
-    // inheriting P1's handler.
+    // Reset SIGCHLD handler to default. P2 should not
+    // inherit P1's (the daemon's) SIGCHLD handler.
     signal(SIGCHLD, SIG_DFL);
 
-    // --- (FIX Bug D) ---
     // Make this process a new group leader.
-    // This allows 'jobkill' to kill both P2 and P3.
+    // This allows 'jobkill' to send a signal to -PID,
+    // killing both P2 and its child P3.
     if (setpgid(0, 0) == -1) {
         perror("setpgid");
     }
 
-    // --- (FIX Bug E) ---
-    // Ignore SIGPIPE. If jobstream client disconnects,
-    // we will get an EPIPE error on write() instead
-    // of crashing the process.
+    // Ignore SIGPIPE. If a 'jobstream' client disconnects
+    // from the FIFO, we'd get SIGPIPE. Ignoring it lets
+    // write() fail with EPIPE instead, which we can handle.
     signal(SIGPIPE, SIG_IGN);
 
     // P2 must re-attach to shared memory
@@ -134,9 +119,9 @@ static void run_job_manager(int job_index, int semid) {
     // 5. P2's "Tee" logic
     close(p[1]); // P2 only *reads* from the pipe
 
-    // (FIX) Open the FIFO for reading in non-blocking mode first.
-    // This acts as a "keep-alive" and prevents the O_WRONLY
-    // open from blocking.
+    // Open the FIFO for reading in non-blocking mode first.
+    // This is a "keep-alive" trick. It prevents the O_WRONLY
+    // open from blocking if no 'jobstream' client is listening.
     int fifo_dummy_rd_fd = open(job->fifo_file, O_RDONLY | O_NONBLOCK);
     if (fifo_dummy_rd_fd == -1) {
         perror("open (fifo_dummy_rd_fd)"); 
@@ -160,8 +145,7 @@ static void run_job_manager(int job_index, int semid) {
         }
         // Write to FIFO (for live streaming)
         if (fifo_fd != -1) {
-            // --- (FIX Bug E) ---
-            // Check for a broken pipe error.
+            // Check for a broken pipe error (EPIPE)
             if (write(fifo_fd, buffer, n_read) == -1) {
                 if (errno == EPIPE) {
                     // jobstream client disconnected.
@@ -177,7 +161,7 @@ static void run_job_manager(int job_index, int semid) {
     close(p[0]);
     if (log_fd != -1) close(log_fd);
     if (fifo_fd != -1) close(fifo_fd);
-    // (FIX) Close the dummy read descriptor
+    // Close the dummy read descriptor
     if (fifo_dummy_rd_fd != -1) close(fifo_dummy_rd_fd);
 
     // 7. Wait for P3 (Executor) to finish
@@ -188,16 +172,15 @@ static void run_job_manager(int job_index, int semid) {
     // --- CRITICAL SECTION ---
     sem_lock(semid);
     
-    // --- (FIX Bug F) ---
     // Only update the status if it's currently RUNNING.
-    // This prevents overwriting a KILLED status.
+    // This prevents overwriting a KILLED status set by 'jobkill'.
     if (job->status == STATUS_RUNNING) {
         if (WIFEXITED(exec_status) && WEXITSTATUS(exec_status) == 0) {
             job->status = STATUS_DONE;
         } else {
             job->status = STATUS_FAILED;
         }
-        // --- (FIX) Set the end time ---
+        // Set the end time for the completed job
         job->end_time = time(NULL);
     }
     
@@ -216,9 +199,10 @@ static void run_job_manager(int job_index, int semid) {
  * run_executor (P3 - The Executor)
  *
  * This code is run by the P3 (grandchild) process.
+ * It redirects its stdout/stderr to the pipe and
+ * executes the job's command string using /bin/sh -c.
  */
 static void run_executor(const char* cmd, int p[2]) {
-    // --- (FIX Bug B) ---
     // Reset SIGCHLD handler to default.
     signal(SIGCHLD, SIG_DFL);
     
