@@ -13,36 +13,40 @@
  * from the controlling terminal and run it in the background.
  */
 void daemonize() {
+    // First fork: Parent exits, child continues.
     pid_t pid = fork();
     if (pid < 0) exit(1); // Fork error
     if (pid > 0) exit(0); // Parent exits
 
-    // Child (P1) becomes session leader
+    // First child: Become session leader to detach from TTY.
     if (setsid() < 0) exit(1);
 
-    // Handle signals
-    signal(SIGHUP, SIG_IGN); // Ignore hangup signal
+    // Ignore hangup signal, as the controlling TTY is gone.
+    signal(SIGHUP, SIG_IGN);
 
-    // Fork again, let P1 exit
+    // Second fork: Ensure daemon is not session leader,
+    // which prevents it from re-acquiring a TTY.
     pid = fork();
     if (pid < 0) exit(1); // Fork error
-    if (pid > 0) exit(0); // P1 (session leader) exits
+    if (pid > 0) exit(0); // Session leader (first child) exits
 
-    // P2 (the daemon) continues
-    
-    // Change working directory to root
+    // Second child (the daemon) continues.
+
+    // Change CWD to root to prevent locking mounted filesystems.
     chdir("/");
 
-    // Set new file permissions mask
+    // Clear file mask to have full control over file permissions.
     umask(0);
 
-    // Close standard file descriptors
+    // Close standard file descriptors.
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
 
-    // Redirect them to /dev/null
-    open("/dev/null", O_RDONLY);
-    open("/dev/null", O_WRONLY);
-    open("/dev/null", O_WRONLY);
+    // Redirect stdin, stdout, and stderr to /dev/null.
+    // This prevents library calls from failing if they
+    // try to read/write from standard I/O.
+    open("/dev/null", O_RDONLY); // stdin (fd 0)
+    open("/dev/null", O_WRONLY); // stdout (fd 1)
+    open("/dev/null", O_WRONLY); // stderr (fd 2)
 }

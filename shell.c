@@ -1,17 +1,16 @@
 /**
  * shell.c
  *
- * The "SHell" Frontend Client (Refactored)
+ * The "SHell" Frontend Client.
  *
- * --- (FIX) LIVE JOBSTATUS FEATURE ---
- * The main() function is modified to check for command-line
- * arguments (argc > 1). If arguments are provided
- * (e.g., "./shell jobstatus"), it will execute that
- * one command and exit, rather than starting the
- * interactive REPL.
+ * This program acts as the user interface for the SH-are system.
+ * It connects to the IPC resources created by the 'shared' daemon
+ * and provides a Read-Eval-Print Loop (REPL) for submitting
+ * and managing jobs.
  *
- * This makes the shell "non-interactive" and allows
- * it to be used by 'watch' (e.g., "watch -n 1 ./shell jobstatus").
+ * It can also run in "non-interactive" mode. For example,
+ * "./shell jobstatus" will execute the 'jobstatus' command
+ * once and exit, which is useful for scripts or 'watch'.
  */
 
 #include "sh_share.h"
@@ -30,13 +29,14 @@ struct sh_job_queue *shm_ptr = NULL; // Pointer to our shared memory segment
 void repl_loop();
 int parse_line(char *line, char **tokens);
 void execute_command(int n_tokens, char **tokens);
-void reap_local_jobs_handler(int signal); // (Feature 3)
+void reap_local_jobs_handler(int signal); // Handler for local 'cmd &' jobs
 
 
 /**
- * Main shell entry point
- *
- * --- (FIX) MODIFIED FOR NON-INTERACTIVE MODE ---
+ * main
+ * Shell entry point.
+ * Connects to IPC, sets up handlers, and decides whether
+ * to run in interactive (REPL) or non-interactive mode.
  */
 int main(int argc, char *argv[]) {
     // 1. Connect to existing IPC resources
@@ -52,12 +52,12 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    // (Feature 3) Initialize local job list and setup handler
+    // Initialize local job list and setup handler
     init_local_jobs();
     signal(SIGCHLD, reap_local_jobs_handler);
 
 
-    // --- (FIX) Check for non-interactive mode ---
+    // Check for non-interactive mode
     if (argc > 1) {
         // Arguments provided. Execute them directly and exit.
         // We pass (argc - 1) and (argv + 1) to skip the
@@ -67,7 +67,6 @@ int main(int argc, char *argv[]) {
         // No arguments. Run the normal interactive REPL.
         repl_loop();
     }
-    // --- END FIX ---
 
 
     // 4. Detach from shared memory before exiting
@@ -79,10 +78,11 @@ int main(int argc, char *argv[]) {
 }
 
 /**
- * (Feature 3) reap_local_jobs_handler
+ * reap_local_jobs_handler
  *
- * Catches SIGCHLD to clean up locally-run background jobs (cmd &).
- * This does NOT handle daemon (P2) jobs.
+ * Catches SIGCHLD to clean up locally-run background jobs (e.g., 'sleep 10 &').
+ * This handler is only for jobs launched by this shell, NOT for
+ * jobs submitted to the 'shared' daemon.
  */
 void reap_local_jobs_handler(int signal) {
     (void)signal; // Unused
@@ -101,7 +101,7 @@ void reap_local_jobs_handler(int signal) {
 /**
  * repl_loop
  *
- * The main Read-Eval-Print Loop for the shell.
+ * The main Read-Eval-Print Loop for the interactive shell.
  */
 void repl_loop() {
     char line[MAX_LINE_LEN];
@@ -120,6 +120,7 @@ void repl_loop() {
         
         // --- Eval ---
         // Special case for "submit" which has custom parsing
+        // (to handle quoted strings)
         if (strncmp(line, "submit ", 7) == 0) {
             do_submit(line, semid, shm_ptr);
             continue; // Skip normal tokenizing
@@ -139,6 +140,7 @@ void repl_loop() {
  * parse_line
  *
  * Simple parser that tokenizes a line by whitespace.
+ * Populates the 'tokens' array and returns the token count.
  */
 int parse_line(char *line, char **tokens) {
     int n = 0;
@@ -159,11 +161,12 @@ int parse_line(char *line, char **tokens) {
  *
  * The main command dispatcher. It checks for built-in commands
  * and calls the appropriate handler from the 'builtins' module.
+ * If not a built-in, it executes it as an external command.
  */
 void execute_command(int n_tokens, char **tokens) {
     char *cmd = tokens[0];
 
-    // (Feature 3) Check for background execution
+    // Check for background execution ('&')
     int background = 0;
     if (n_tokens > 0 && strcmp(tokens[n_tokens - 1], "&") == 0) {
         background = 1;
@@ -192,10 +195,8 @@ void execute_command(int n_tokens, char **tokens) {
     } else if (strcmp(cmd, "shutdown_server") == 0) {
         do_shutdown(msgid);
     } else if (strcmp(cmd, "myls") == 0) {
-        // (Refactor 1) 'myls' no longer requires '-1'
         do_myls();
     } 
-    // (Feature 1)
     else if (strcmp(cmd, "jobkill") == 0) {
         if (n_tokens < 2) {
             fprintf(stderr, "Usage: jobkill <job_id>\n");
@@ -203,21 +204,18 @@ void execute_command(int n_tokens, char **tokens) {
             do_jobkill(tokens[1], semid, shm_ptr);
         }
     }
-    // (Feature 3)
     else if (strcmp(cmd, "jobs") == 0) {
-        do_jobs();
+        do_jobs(); // List local background jobs
     }
-    // (Feature 3)
     else if (strcmp(cmd, "kill") == 0) {
          if (n_tokens < 2) {
             fprintf(stderr, "Usage: kill <pid>\n");
         } else {
-            do_kill_local(tokens[1]);
+            do_kill_local(tokens[1]); // Kill a local background job
         }
     }
     else {
         // Not a built-in, execute as external command
-        // (Feature 3) Pass the background flag
         do_external_command(tokens, background);
     }
 }

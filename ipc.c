@@ -7,10 +7,15 @@
 #include "ipc.h"
 
 /**
- * Private helper function to generate the common IPC key.
+ * get_ipc_key (Static Helper)
+ *
+ * Generates the common System V IPC key.
+ * It touches a file at KEY_PATH to ensure ftok() can use it.
+ * @returns The generated key_t, or -1 on error.
  */
 static key_t get_ipc_key() {
-    // Create the key file if it doesn't exist
+    // Create the key file if it doesn't exist. This file is just
+    // a handle for ftok() and doesn't store data.
     int key_fd = open(KEY_PATH, O_CREAT | O_RDONLY, 0666);
     if (key_fd == -1) {
         perror("Failed to create key file");
@@ -18,13 +23,16 @@ static key_t get_ipc_key() {
     }
     close(key_fd);
 
-    // Generate the common IPC key
+    // Generate the common IPC key from the file path and project ID.
     return ftok(KEY_PATH, PROJ_ID);
 }
 
 /**
  * ipc_setup_server
- * Creates and initializes all IPC resources (SHM, SEM, MSGQ).
+ *
+ * Creates and initializes all IPC resources (SHM, SEM, MSGQ)
+ * for the server process.
+ * @returns 0 on success, -1 on failure.
  */
 int ipc_setup_server(int *shmid, int *semid, int *msgid) {
     key_t key = get_ipc_key();
@@ -43,7 +51,7 @@ int ipc_setup_server(int *shmid, int *semid, int *msgid) {
     // 2. Create Semaphore (1 semaphore in the set)
     *semid = semget(key, 1, IPC_CREAT | 0666);
     if (*semid == -1) {
-        perror("shmget");
+        perror("semget"); // Note: shmget was a typo in original, corrected to semget
         return -1;
     }
 
@@ -65,18 +73,27 @@ int ipc_setup_server(int *shmid, int *semid, int *msgid) {
 
 /**
  * ipc_cleanup_server
+ *
  * Removes all IPC resources given their IDs.
+ * Called by the server on shutdown.
  */
 void ipc_cleanup_server(int shmid, int semid, int msgid) {
+    // Remove the shared memory segment
     shmctl(shmid, IPC_RMID, NULL);
+    // Remove the semaphore set
     semctl(semid, 0, IPC_RMID);
-    msgctl(msgid, IPC_RMID, NULL); // FIX: Added NULL as the third argument
-    unlink(KEY_PATH); // Clean up the key file
+    // Remove the message queue
+    msgctl(msgid, IPC_RMID, NULL);
+    // Clean up the key file
+    unlink(KEY_PATH);
 }
 
 /**
  * ipc_setup_client
- * Attaches to all existing IPC resources.
+ *
+ * Attaches to all existing IPC resources for a client process.
+ * This function does not create resources, only accesses them.
+ * @returns 0 on success, -1 on failure.
  */
 int ipc_setup_client(int *shmid, int *semid, int *msgid) {
     key_t key = get_ipc_key();
@@ -86,24 +103,27 @@ int ipc_setup_client(int *shmid, int *semid, int *msgid) {
         return -1;
     }
 
-    // 1. Get Shared Memory
-    *shmid = shmget(key, 0, 0666); // 0 size, no IPC_CREAT
+    // 1. Get Shared Memory ID
+    // Note: Size is 0 and no IPC_CREAT flag.
+    *shmid = shmget(key, 0, 0666);
     if (*shmid == -1) {
         perror("shmget (client)");
         fprintf(stderr, "Error: Could not get SHM. Is the server running?\n");
         return -1;
     }
 
-    // 2. Get Semaphore
-    *semid = semget(key, 0, 0666); // 0 semaphores, no IPC_CREAT
+    // 2. Get Semaphore ID
+    // Note: nsems is 0 and no IPC_CREAT flag.
+    *semid = semget(key, 0, 0666);
     if (*semid == -1) {
         perror("semget (client)");
         fprintf(stderr, "Error: Could not get SEM. Is the server running?\n");
         return -1;
     }
 
-    // 3. Get Message Queue
-    *msgid = msgget(key, 0666); // no IPC_CREAT  // FIX: Removed the extra '0,' argument
+    // 3. Get Message Queue ID
+    // Note: No IPC_CREAT flag.
+    *msgid = msgget(key, 0666);
     if (*msgid == -1) {
         perror("msgget (client)");
         fprintf(stderr, "Error: Could not get MSGQ. Is the server running?\n");
@@ -115,7 +135,9 @@ int ipc_setup_client(int *shmid, int *semid, int *msgid) {
 
 /**
  * ipc_get_shm_ptr
+ *
  * Attaches to the shared memory segment given its ID.
+ * @returns A pointer to the sh_job_queue struct, or (void*)-1 on error.
  */
 struct sh_job_queue* ipc_get_shm_ptr(int shmid) {
     struct sh_job_queue* ptr = (struct sh_job_queue *)shmat(shmid, NULL, 0);
