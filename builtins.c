@@ -2,6 +2,18 @@
  * builtins.c
  *
  * Implementation of all the shell's built-in commands.
+ *
+ * --- (FIX) LIVE JOBSTATUS FEATURE ---
+ * 1. do_submit() now sets the job->submit_time.
+ * 2. do_jobkill() now sets the job->end_time.
+ * 3. do_jobstatus() is completely rewritten to display
+ * the new timestamps in a formatted way.
+ * 4. Added a new static helper format_time().
+ *
+ * --- (FIX Bug D) ---
+ * 1. do_jobkill() now sends the signal to -p2_pid
+ * (the negative PID) to kill the entire
+ * process group, preventing orphaned P3 processes.
  */
 #include "builtins.h"
 
@@ -101,6 +113,7 @@ static int find_job_by_id(int job_id, struct sh_job_queue *shm_ptr) {
  *
  * Parses the 'submit "..."' command, finds an empty job slot
  * in shared memory, and populates it.
+ * --- (FIX) MODIFIED to set submit_time ---
  */
 void do_submit(char *line, int semid, struct sh_job_queue *shm_ptr) {
     // Custom parsing for 'submit "command string"'
@@ -150,6 +163,11 @@ void do_submit(char *line, int semid, struct sh_job_queue *shm_ptr) {
         sprintf(job->log_file, "/tmp/job-%d.log", job->job_id);
         sprintf(job->fifo_file, "/tmp/job-%d.fifo", job->job_id);
 
+        // --- (FIX) Set timestamps ---
+        job->submit_time = time(NULL);
+        job->start_time = 0; // Not started yet
+        job->end_time = 0;   // Not finished yet
+
         printf("[SHell] Job %d submitted: \"%s\"\n", job->job_id, job->cmd);
     }
 
@@ -158,24 +176,45 @@ void do_submit(char *line, int semid, struct sh_job_queue *shm_ptr) {
 }
 
 /**
+ * --- (FIX) NEW HELPER FUNCTION ---
+ * format_time
+ *
+ * Helper to format time_t into "HH:MM:SS" or "---" if time is 0.
+ */
+static void format_time(time_t t, char *buf, size_t buf_size) {
+    if (t == 0) {
+        snprintf(buf, buf_size, "   ---    ");
+    } else {
+        // Use localtime_r for thread-safety, though not strictly needed here
+        struct tm tm_info;
+        localtime_r(&t, &tm_info);
+        strftime(buf, buf_size, "%H:%M:%S", &tm_info);
+    }
+}
+
+/**
  * do_jobstatus
  *
  * Reads the entire job table from shared memory and prints it.
+ * --- (FIX) HEAVILY MODIFIED to print timestamps ---
  */
 void do_jobstatus(int semid, struct sh_job_queue *shm_ptr) {
     // (Feature 1) Added "KILLED" to status strings
     const char* status_str[] = {"EMPTY", "QUEUED", "RUNNING", "DONE", "FAILED", "KILLED"};
     char cmd_preview[31]; // 30 chars + null
+    char submit_buf[16], start_buf[16], end_buf[16]; // Buffers for time strings
+    int active_jobs = 0;
 
     // --- CRITICAL SECTION ---
     sem_lock(semid);
     
     printf("\n--- SHare Job Status ---\n");
-    printf("[ID]\t[PID]\t[STATUS]\t[COMMAND]\n");
-    printf("----------------------------------------------------------\n");
+    printf("[ID]\t[PID]\t[STATUS]\t[SUBMIT]\t[START]\t\t[END]\t\t[COMMAND]\n");
+    printf("--------------------------------------------------------------------------------------------------\n");
 
     for (int i = 0; i < MAX_JOBS; i++) {
         if (shm_ptr->jobs[i].status != STATUS_EMPTY) {
+            active_jobs++;
             struct sh_job *job = &shm_ptr->jobs[i];
             
             // Create a truncated command for clean printing
@@ -185,20 +224,33 @@ void do_jobstatus(int semid, struct sh_job_queue *shm_ptr) {
             } else {
                 cmd_preview[strlen(job->cmd)] = '\0';
             }
+            
+            // Format timestamps
+            format_time(job->submit_time, submit_buf, sizeof(submit_buf));
+            format_time(job->start_time, start_buf, sizeof(start_buf));
+            format_time(job->end_time, end_buf, sizeof(end_buf));
 
-            printf("%d\t%d\t%-7s\t\"%s\"\n",
+            printf("%d\t%d\t%-7s\t%s\t%s\t%s\t\"%s\"\n",
                 job->job_id,
                 job->pid,
                 status_str[job->status],
+                submit_buf,
+                start_buf,
+                end_buf,
                 cmd_preview
             );
         }
     }
-    printf("----------------------------------------------------------\n");
+    
+    if (active_jobs == 0) {
+        printf("No active or completed jobs in the queue.\n");
+    }
+    printf("--------------------------------------------------------------------------------------------------\n");
 
     sem_unlock(semid);
     // --- END CRITICAL SECTION ---
 }
+
 
 /**
  * do_jobstream
@@ -319,8 +371,9 @@ void do_joblog(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
 /**
  * (Feature 1) do_jobkill
  *
- * Finds a job by ID, sends a SIGKILL to its P2 process,
- * and updates its status in shared memory to STATUS_KILLED.
+ * --- (FIX) MODIFIED to set end_time ---
+ * --- (FIX Bug D) ---
+ * Sends SIGKILL to the entire process group.
  */
 void do_jobkill(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
     int job_id = atoi(job_id_str);
@@ -346,9 +399,10 @@ void do_jobkill(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
             p2_pid = job->pid;
             job_found = 1;
             // Mark it as KILLED immediately.
-            // The daemon's SIGCHLD handler will catch the dead P2
-            // and decrement running_job_count.
             job->status = STATUS_KILLED;
+            
+            // --- (FIX) Set the end time ---
+            job->end_time = time(NULL);
         }
     }
     
@@ -356,8 +410,11 @@ void do_jobkill(char *job_id_str, int semid, struct sh_job_queue *shm_ptr) {
     // --- END CRITICAL SECTION ---
     
     if (job_found && p2_pid > 0) {
-        if (kill(p2_pid, SIGKILL) == 0) {
-            printf("[SHell] Kill signal sent to Job %d (PID %d).\n", job_id, p2_pid);
+        // --- (FIX Bug D) ---
+        // Send signal to the *negative* PID. This kills the
+        // entire process group (P2 and P3).
+        if (kill(-p2_pid, SIGKILL) == 0) {
+            printf("[SHell] Kill signal sent to Job %d (Process Group %d).\n", job_id, p2_pid);
         } else {
             perror("kill");
         }

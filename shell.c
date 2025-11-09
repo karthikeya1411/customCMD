@@ -3,13 +3,15 @@
  *
  * The "SHell" Frontend Client (Refactored)
  *
- * This is the user-facing interactive REPL (Read-Eval-Print Loop).
- * Its responsibilities are now simpler:
- * 1.  Attach to IPC resources (via ipc.c).
- * 2.  Run the REPL.
- * 3.  Parse user input.
- * 4.  Dispatch commands to the 'builtins' module.
- * 5.  (Feature 3) Manage local background jobs (e.g., cmd &)
+ * --- (FIX) LIVE JOBSTATUS FEATURE ---
+ * The main() function is modified to check for command-line
+ * arguments (argc > 1). If arguments are provided
+ * (e.g., "./shell jobstatus"), it will execute that
+ * one command and exit, rather than starting the
+ * interactive REPL.
+ *
+ * This makes the shell "non-interactive" and allows
+ * it to be used by 'watch' (e.g., "watch -n 1 ./shell jobstatus").
  */
 
 #include "sh_share.h"
@@ -33,8 +35,10 @@ void reap_local_jobs_handler(int signal); // (Feature 3)
 
 /**
  * Main shell entry point
+ *
+ * --- (FIX) MODIFIED FOR NON-INTERACTIVE MODE ---
  */
-int main() {
+int main(int argc, char *argv[]) {
     // 1. Connect to existing IPC resources
     if (ipc_setup_client(&shmid, &semid, &msgid) == -1) {
         fprintf(stderr, "Failed to connect to SHare server. Exiting.\n");
@@ -52,8 +56,19 @@ int main() {
     init_local_jobs();
     signal(SIGCHLD, reap_local_jobs_handler);
 
-    // 3. Run the Read-Eval-Print Loop
-    repl_loop();
+
+    // --- (FIX) Check for non-interactive mode ---
+    if (argc > 1) {
+        // Arguments provided. Execute them directly and exit.
+        // We pass (argc - 1) and (argv + 1) to skip the
+        // program name itself ("./shell").
+        execute_command(argc - 1, argv + 1);
+    } else {
+        // No arguments. Run the normal interactive REPL.
+        repl_loop();
+    }
+    // --- END FIX ---
+
 
     // 4. Detach from shared memory before exiting
     if (shm_ptr) {

@@ -31,6 +31,7 @@
 #include <fcntl.h>      // for open, O_RDONLY, O_WRONLY
 #include <dirent.h>     // for opendir, readdir
 #include <sys/stat.h>   // for stat, mkfifo, S_ISDIR
+#include <time.h>       // --- ADDED FOR TIMESTAMPS ---
 
 // --- IPC Includes ---
 #include <sys/ipc.h>   // for ftok, IPC_CREAT, etc.
@@ -73,6 +74,11 @@ struct sh_job {
     char cmd[MAX_CMD_LEN];      // The full command string
     char log_file[64];          // Path to the persistent log file (e.g., "/tmp/job-101.log")
     char fifo_file[64];         // Path to the live stream FIFO (e.g., "/tmp/job-101.fifo")
+
+    // --- ADDED FOR TIMESTAMP FEATURE ---
+    time_t submit_time;         // When the job was submitted
+    time_t start_time;          // When the job was set to RUNNING
+    time_t end_time;            // When the job was set to DONE/FAILED/KILLED
 };
 
 /**
