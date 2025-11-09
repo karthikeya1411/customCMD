@@ -3,12 +3,15 @@
  *
  * The "SHell" Frontend Client (Refactored)
  *
- * This is the user-facing interactive REPL (Read-Eval-Print Loop).
- * Its responsibilities are now simpler:
- * 1.  Attach to IPC resources (via ipc.c).
- * 2.  Run the REPL.
- * 3.  Parse user input.
- * 4.  Dispatch commands to the 'builtins' module.
+ * --- (FIX) LIVE JOBSTATUS FEATURE ---
+ * The main() function is modified to check for command-line
+ * arguments (argc > 1). If arguments are provided
+ * (e.g., "./shell jobstatus"), it will execute that
+ * one command and exit, rather than starting the
+ * interactive REPL.
+ *
+ * This makes the shell "non-interactive" and allows
+ * it to be used by 'watch' (e.g., "watch -n 1 ./shell jobstatus").
  */
 
 #include "sh_share.h"
@@ -27,12 +30,15 @@ struct sh_job_queue *shm_ptr = NULL; // Pointer to our shared memory segment
 void repl_loop();
 int parse_line(char *line, char **tokens);
 void execute_command(int n_tokens, char **tokens);
+void reap_local_jobs_handler(int signal); // (Feature 3)
 
 
 /**
  * Main shell entry point
+ *
+ * --- (FIX) MODIFIED FOR NON-INTERACTIVE MODE ---
  */
-int main() {
+int main(int argc, char *argv[]) {
     // 1. Connect to existing IPC resources
     if (ipc_setup_client(&shmid, &semid, &msgid) == -1) {
         fprintf(stderr, "Failed to connect to SHare server. Exiting.\n");
@@ -46,8 +52,23 @@ int main() {
         exit(1);
     }
 
-    // 3. Run the Read-Eval-Print Loop
-    repl_loop();
+    // (Feature 3) Initialize local job list and setup handler
+    init_local_jobs();
+    signal(SIGCHLD, reap_local_jobs_handler);
+
+
+    // --- (FIX) Check for non-interactive mode ---
+    if (argc > 1) {
+        // Arguments provided. Execute them directly and exit.
+        // We pass (argc - 1) and (argv + 1) to skip the
+        // program name itself ("./shell").
+        execute_command(argc - 1, argv + 1);
+    } else {
+        // No arguments. Run the normal interactive REPL.
+        repl_loop();
+    }
+    // --- END FIX ---
+
 
     // 4. Detach from shared memory before exiting
     if (shm_ptr) {
@@ -55,6 +76,25 @@ int main() {
     }
     
     return 0;
+}
+
+/**
+ * (Feature 3) reap_local_jobs_handler
+ *
+ * Catches SIGCHLD to clean up locally-run background jobs (cmd &).
+ * This does NOT handle daemon (P2) jobs.
+ */
+void reap_local_jobs_handler(int signal) {
+    (void)signal; // Unused
+    pid_t pid;
+    
+    // Reap all finished children without blocking
+    while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
+        printf("\n[SHell] Local job (PID %d) finished.\n", pid);
+        remove_local_job(pid); // Mark as reaped
+        printf("SNIST-SHell > "); // Re-draw prompt
+        fflush(stdout);
+    }
 }
 
 
@@ -123,6 +163,14 @@ int parse_line(char *line, char **tokens) {
 void execute_command(int n_tokens, char **tokens) {
     char *cmd = tokens[0];
 
+    // (Feature 3) Check for background execution
+    int background = 0;
+    if (n_tokens > 0 && strcmp(tokens[n_tokens - 1], "&") == 0) {
+        background = 1;
+        tokens[n_tokens - 1] = NULL; // Remove '&' from token list
+        n_tokens--;
+    }
+
     if (strcmp(cmd, "exit") == 0) {
         exit(0);
     } else if (strcmp(cmd, "cd") == 0) {
@@ -144,13 +192,32 @@ void execute_command(int n_tokens, char **tokens) {
     } else if (strcmp(cmd, "shutdown_server") == 0) {
         do_shutdown(msgid);
     } else if (strcmp(cmd, "myls") == 0) {
-        if (n_tokens > 1 && strcmp(tokens[1], "-1") == 0) {
-            do_myls();
+        // (Refactor 1) 'myls' no longer requires '-1'
+        do_myls();
+    } 
+    // (Feature 1)
+    else if (strcmp(cmd, "jobkill") == 0) {
+        if (n_tokens < 2) {
+            fprintf(stderr, "Usage: jobkill <job_id>\n");
         } else {
-            fprintf(stderr, "Usage: myls -1\n");
+            do_jobkill(tokens[1], semid, shm_ptr);
         }
-    } else {
+    }
+    // (Feature 3)
+    else if (strcmp(cmd, "jobs") == 0) {
+        do_jobs();
+    }
+    // (Feature 3)
+    else if (strcmp(cmd, "kill") == 0) {
+         if (n_tokens < 2) {
+            fprintf(stderr, "Usage: kill <pid>\n");
+        } else {
+            do_kill_local(tokens[1]);
+        }
+    }
+    else {
         // Not a built-in, execute as external command
-        do_external_command(tokens);
+        // (Feature 3) Pass the background flag
+        do_external_command(tokens, background);
     }
 }
